@@ -420,3 +420,244 @@ func (ImagesApi) ImagesListView(c *gin.Context) {
 }
 ```
 
+## 图片删除
+
+在`models`目录中的`enter.go`文件中新增以下内容
+
+```go
+type RemoveRequest struct {
+	IDList []uint `json:"id_list"`
+}
+```
+
+**图片删除方法**
+
+```go
+package images_api
+
+import (
+	"fmt"
+	"github.com/gin-gonic/gin"
+	"gvb_server/global"
+	"gvb_server/models"
+	"gvb_server/utils/res"
+)
+
+// ImagesRemoveApi 删除图片
+func (ImagesApi) ImagesRemoveApi(c *gin.Context) {
+	var cr models.RemoveRequest
+	err := c.ShouldBindJSON(&cr)
+	if err != nil {
+		res.FailErrorCode(res.ArgumentError, c)
+		return
+	}
+	var bannerList []models.BannerModel
+	count := global.DB.Select("id").Find(&bannerList, cr.IDList).RowsAffected
+	if count == 0 {
+		res.FailWithMsg("没有该图片", c)
+		return
+	}
+	// 删除图片
+	err = global.DB.Delete(&bannerList).Error
+	if err != nil {
+		res.FailWithMsg("删除图片失败", c)
+		return
+	}
+	res.OKWithMsg(fmt.Sprintf("共删除%d张图片", count), c)
+}
+```
+
+## 修改图片名称
+
+**在工具类中新增参数校验的方法**
+
+```go
+package utils
+
+import (
+	"github.com/go-playground/validator/v10"
+	"reflect"
+)
+
+// GetValidMsg 返回结构体中的msg参数
+func GetValidMsg(err error, obj any) string {
+	// 使用的时候，需要传obj的指针
+	getObj := reflect.TypeOf(obj)
+	// 将err接口断言为具体类型
+	if errs, ok := err.(validator.ValidationErrors); ok {
+		// 断言成功
+		for _, e := range errs {
+			// 循环每一个错误信息
+			// 根据报错字段名，获取结构体的具体字段
+			if f, exits := getObj.Elem().FieldByName(e.Field()); exits {
+				msg := f.Tag.Get("msg")
+				return msg
+			}
+		}
+	}
+
+	return err.Error()
+}
+```
+
+**在`response`文件中新增参数绑定失败的方法**
+
+```go
+// FailWithError 参数绑定失败
+func FailWithError(err error, obj any, c *gin.Context) {
+	msg := utils.GetValidMsg(err, obj)
+	FailWithMsg(msg, c)
+}
+```
+
+**修改图片名称方法**
+
+```go
+package images_api
+
+import (
+	"github.com/gin-gonic/gin"
+	"gvb_server/global"
+	"gvb_server/models"
+	"gvb_server/utils/res"
+)
+
+type ImagesUpdateRequest struct {
+	ID   uint   `json:"id" binding:"required" msg:"请输入图片ID"`
+	Name string `json:"name" binding:"required" msg:"请输入图片名称"`
+}
+
+// ImagesUpdateView 编辑图片
+func (ImagesApi) ImagesUpdateView(c *gin.Context) {
+	var cr ImagesUpdateRequest
+	err := c.ShouldBindJSON(&cr)
+	if err != nil {
+		res.FailWithError(err, &cr, c)
+		return
+	}
+	var bannerModel models.BannerModel
+	err = global.DB.Take(&bannerModel, cr.ID).Error
+	if err != nil {
+		res.FailWithMsg("图片不存在", c)
+		return
+	}
+	// 图片存在修改图片
+	err = global.DB.Model(&bannerModel).Update("name", cr.Name).Error
+	if err != nil {
+		res.FailWithMsg("图片修改失败", c)
+		return
+	}
+	res.OKWithMsg("图片修改成功", c)
+}
+```
+
+## 上传图片至七牛云
+
+**在`plugins`目录下新增七牛云相关配置**
+
+```go
+package qiniu
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"github.com/qiniu/go-sdk/v7/auth/qbox"
+	"github.com/qiniu/go-sdk/v7/storage"
+	"gvb_server/config"
+	"gvb_server/global"
+
+	"time"
+)
+
+// 获取上传的token
+func getToken(q config.QiNiu) string {
+	accessKey := q.AccessKey
+	secretKey := q.SecretKey
+	bucket := q.Bucket
+	putPolicy := storage.PutPolicy{
+		Scope: bucket,
+	}
+	mac := qbox.NewMac(accessKey, secretKey)
+	upToken := putPolicy.UploadToken(mac)
+	return upToken
+}
+
+// 获取上传的配置
+func getCfg(q config.QiNiu) storage.Config {
+	cfg := storage.Config{}
+	// 空间对应的机房
+	zone, _ := storage.GetRegionByID(storage.RegionID(q.Zone))
+	cfg.Zone = &zone
+	// 是否使用https域名
+	cfg.UseHTTPS = false
+	// 上传是否使用CDN上传加速
+	cfg.UseCdnDomains = false
+	return cfg
+
+}
+
+// UploadImage 上传图片  文件数组，前缀
+func UploadImage(data []byte, imageName string, prefix string) (filePath string, err error) {
+	if !global.Config.QiNiu.Enable {
+		return "", errors.New("请启用七牛云上传")
+	}
+	q := global.Config.QiNiu
+	if q.AccessKey == "" || q.SecretKey == "" {
+		return "", errors.New("请配置accessKey及secretKey")
+	}
+	if float64(len(data))/1024/1024 > q.Size {
+		return "", errors.New("文件超过设定大小")
+	}
+	upToken := getToken(q)
+	cfg := getCfg(q)
+
+	formUploader := storage.NewFormUploader(&cfg)
+	ret := storage.PutRet{}
+	putExtra := storage.PutExtra{
+		Params: map[string]string{},
+	}
+	dataLen := int64(len(data))
+
+	// 获取当前时间
+	now := time.Now().Format("20060102150405")
+	key := fmt.Sprintf("%s/%s__%s", prefix, now, imageName)
+
+	err = formUploader.Put(context.Background(), &ret, upToken, key, bytes.NewReader(data), dataLen, &putExtra)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s%s", q.CDN, ret.Key), nil
+
+}
+```
+
+**修改图片上传，在图片上传之前判断七牛云存储是否打开**
+
+启用七牛云存储新增如下代码：
+
+```go
+// 启用七牛云存储，就上传文件到七牛云
+		if global.Config.QiNiu.Enable {
+			qiniuFilePath, err := qiniu.UploadImage(fileBytes, fileName, "gvb")
+			if err != nil {
+				global.Log.Error(err.Error())
+				continue
+			}
+			fileUploadResponse = append(fileUploadResponse, FileUploadResponse{
+				FileName:  qiniuFilePath,
+				IsSuccess: true,
+				Msg:       "上传 文件至七牛云",
+			})
+			// 图片入库
+			global.DB.Create(&models.BannerModel{
+				Name:      fileName,
+				Hash:      imageHash,
+				Path:      filePath,
+				ImageType: ctype.QINIU,
+			})
+			continue
+		}
+```
+
