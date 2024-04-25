@@ -328,3 +328,95 @@ func (ImagesApi) ImagesUploadView(c *gin.Context) {
 }
 ```
 
+## 图片列表
+
+### 添加返回列表数据的方法
+
+**修改`response.go`文件**
+
+```go
+type ListResponse[T any] struct {
+	List  T     `json:"list"`
+	Count int64 `json:"count"`
+}
+// OKWithList 返回列表数据
+func OKWithList[T any](data T, count int64, c *gin.Context) {
+	OKWithData(ListResponse[any]{
+		Count: count,
+		List:  data,
+	}, c)
+}
+```
+
+### **封装通用查询方法**
+
+```go
+package common
+
+import (
+	"gorm.io/gorm"
+	"gvb_server/global"
+	"gvb_server/models"
+)
+
+type Option struct {
+	models.PageInfo
+	Debug bool
+}
+
+// CommList 通用查询
+func CommList[T any](model T, option Option) (list []T, count int64, err error) {
+	DB := global.DB
+	// Debug模式开启日志显示
+	if option.Debug {
+		DB = global.DB.Session(&gorm.Session{Logger: global.MysqlLog})
+	}
+	// 计算偏移量
+	offset := (option.Page - 1) * option.Limit
+	if offset < 0 {
+		offset = 0
+	}
+	// 页数默认为10
+	if option.Limit == 0 {
+		option.Limit = 10
+	}
+	// 获取总条数
+	count = DB.Select("id").Find(&list).RowsAffected
+	// 分页查询
+	err = DB.Limit(option.Limit).Offset(offset).Find(&list).Error
+	return list, count, err
+}
+```
+
+### 图片列表查询
+
+```go
+package images_api
+
+import (
+	"github.com/gin-gonic/gin"
+	"gvb_server/models"
+	"gvb_server/service/common"
+	"gvb_server/utils/res"
+)
+
+// ImagesListView 查询图片列表
+func (ImagesApi) ImagesListView(c *gin.Context) {
+	var cr models.PageInfo
+	err := c.ShouldBindQuery(&cr)
+	if err != nil {
+		res.FailErrorCode(res.ArgumentError, c)
+		return
+	}
+	list, count, err := common.CommList(models.BannerModel{}, common.Option{
+		PageInfo: cr,
+		Debug:    true,
+	})
+	if err != nil {
+		res.FailWithMsg("查询图片列表失败", c)
+		return
+	}
+	res.OKWithList(list, count, c)
+}
+```
+
