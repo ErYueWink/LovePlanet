@@ -103,3 +103,60 @@ func (ImagesApi) ImagesUploadView(c *gin.Context) {
 
 ```
 
+## 图片白名单、黑名单
+
+**黑名单：**用户上传的图片在黑名单列表中的话，拒绝上传
+
+**白名单：**用户上传的图片在白名单列表中，上传成功
+
+```go
+var (
+	// WhiteImageList 白名单
+	WhiteImageList = []string{
+		"jpg",
+		"jpeg",
+		"png",
+		"gif",
+		"tiff",
+		"webp",
+		"svg",
+		"ico",
+	}
+)
+```
+
+**在`utils`包下编写工具类**
+
+判断用户上传的图片是否在白名单列表中
+
+```go
+package utils
+
+// arg:key 图片后缀名 list:图片后缀名白名单列表
+func InList(key string, list []string) bool {
+	for _, s := range list {
+		if key == s {
+			return true
+		}
+	}
+	return false
+}
+```
+
+**获取文件后缀名**
+
+```go
+// 获取文件后缀名
+		fileName := file.Filename
+		nameList := strings.Split(fileName, ".")
+		suffix := strings.ToLower(nameList[len(nameList)-1])
+		if !utils.InList(suffix, WhiteImageList) {
+			fileUploadResponse = append(fileUploadResponse, FileUploadResponse{
+				FileName:  file.Filename,
+				IsSuccess: false,
+				Msg:       "文件非法",
+			})
+			continue
+		}
+```
+
